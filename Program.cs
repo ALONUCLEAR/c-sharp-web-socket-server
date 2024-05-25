@@ -1,3 +1,4 @@
+using Chat_WebSocket_Server;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -11,15 +12,12 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 const int PORT = 1234;
 builder.WebHost.UseUrls($"https://localohost:{PORT}");
-
-var app = builder.Build();
-
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+builder.Services.AddCors(options =>
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+    options.AddDefaultPolicy(builder => builder.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+});
+
+WebApplication app = builder.Build();
 
 app.UseHttpsRedirection();
 
@@ -27,9 +25,33 @@ app.UseAuthorization();
 
 app.MapControllers();
 
+app.UseCors();
+
 app.UseWebSockets();
 
 List<WebSocket> connections = new List<WebSocket>();
+List<Message> messages = new List<Message>();
+
+string JSonifyMessages()
+{
+    string[] jsonMessages = messages.Select(message => message.ToJson()).ToArray();
+    return $"[{string.Join(", ", jsonMessages)}]";
+}
+
+string toCounting(int number)
+{
+    switch (number % 10)
+    {
+        case 1:
+            return number + "st";
+        case 2:
+            return number + "nd";
+        default:
+            break;
+    }
+
+    return number + "th";
+}
 
 app.Map("/ws", async context =>
 {
@@ -42,26 +64,37 @@ app.Map("/ws", async context =>
         await bodyStreamReader.ReadAsync(buffer, 0, charsInBody);
         string body = new string(buffer);
 
-
-        Console.WriteLine($"Got request, body: \n {body}");
         WebSocket ws = await context.WebSockets.AcceptWebSocketAsync();
         
         connections.Add(ws);
-        string message = body.Length > 0 ? body : "The body was empty";
+        string connectionMessage = $"Connection started on the {toCounting(connections.Count)} web socket";
+        Console.WriteLine(connectionMessage);
+        await Broadcast(connectionMessage);
 
-        await Broadcast($"Connection started on the {connections.Count}th ws");
         await ReceiveMessage(ws, async (result, buffer) =>
         {
             if (result.MessageType == WebSocketMessageType.Text)
             {
                 string text = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                await Broadcast(text);
+                if (Message.isMessage(text))
+                {
+                    messages.Add(text);
+
+                    await Broadcast(JSonifyMessages());
+                } else
+                {
+                    // if it's not a message, just broadcast the same message like an echo
+                    await Broadcast(text);
+                }
             }
             else if (result.MessageType == WebSocketMessageType.Close || ws.State == WebSocketState.Aborted)
             {
-                connections.Remove(ws);
-                await Broadcast("Disconnecting from ws connection");
-                await ws.CloseAsync(result.CloseStatus.Value, result.CloseStatusDescription, CancellationToken.None);
+                if (connections.Count > 0)
+                {
+                    connections.Remove(ws);
+                    await Broadcast("Disconnecting from ws connection");
+                    await ws.CloseAsync(result.CloseStatus.Value, result.CloseStatusDescription, CancellationToken.None);
+                }
             }
         });
     }
@@ -83,7 +116,6 @@ async Task ReceiveMessage(WebSocket socket, Action<WebSocketReceiveResult, byte[
 
 async Task Broadcast(string message)
 {
-    Console.WriteLine(message);
     byte[] bytes = Encoding.UTF8.GetBytes(message);
     foreach (var socket in connections)
     {
@@ -92,6 +124,16 @@ async Task Broadcast(string message)
             await socket.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
         }
     }
+}
+
+app.MapGet("/messages", () => JSonifyMessages());
+
+
+// Configure the HTTP request pipeline.
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
 }
 
 app.Run();
